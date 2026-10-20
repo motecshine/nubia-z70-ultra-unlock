@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.DS_Store
+
+# 备份和 ROM (太大, 不进仓库)
+~/edl-backup/
+edl-backup/
+~/edl-rom/
+edl-rom/
+*.7z
+*.zip
+*.exe
+
+# 临时文件
+/tmp/
+*.aria2

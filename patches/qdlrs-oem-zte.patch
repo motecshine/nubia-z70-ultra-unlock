@@ -1,0 +1,296 @@
+diff --git a/cli/src/main.rs b/cli/src/main.rs
+index 00a12ba..2d7bee3 100644
+--- a/cli/src/main.rs
++++ b/cli/src/main.rs
+@@ -14,7 +14,8 @@ use qdl::{
+     firehose_set_bootable, load_programmer_images, setup_target_device,
+ };
+ use util::{
+-    find_part, print_partition_table, read_gpt_from_storage, read_storage_logical_partition,
++    backup_critical, find_part, print_partition_table, probe_gpt, read_gpt_from_storage,
++    read_storage_logical_partition,
+ };
+ 
+ use std::fs::{self, File};
+@@ -82,6 +83,33 @@ enum Command {
+     /// Print the GPT table
+     PrintGpt,
+ 
++    /// Probe storage reads across LUNs and sector sizes (single EDL session)
++    ProbeGpt,
++
++    /// Backup critical partitions from LUN0 and LUN4 into a directory
++    Backup {
++        #[arg(short, default_value = "backup/")]
++        outdir: String,
++    },
++
++    /// Flash modified GPT + unlock UEFI to boot_a (single EDL session)
++    UnlockFlash {
++        #[arg(long)]
++        gpt_file: String,
++
++        #[arg(long)]
++        uefi_file: String,
++    },
++
++    /// Restore original GPT + boot_a (single EDL session)
++    UnlockRestore {
++        #[arg(long)]
++        gpt_file: String,
++
++        #[arg(long)]
++        boot_file: String,
++    },
++
+     /// Restart the device
+     Reset {
+         #[arg(default_value = "system", value_name = "edl/off/system")]
+@@ -388,6 +416,85 @@ fn main() -> Result<()> {
+         Command::PrintGpt => {
+             print_partition_table(&mut qdl_dev, args.storage_slot, args.phys_part_idx)?
+         }
++        Command::ProbeGpt => probe_gpt(&mut qdl_dev, args.storage_slot)?,
++        Command::Backup { outdir } => backup_critical(&mut qdl_dev, &outdir)?,
++        Command::UnlockFlash { gpt_file, uefi_file } => {
++            // 先拿到 boot_a 起始扇区 (读当前 GPT)
++            let boot_a = find_part(&mut qdl_dev, "boot_a", args.storage_slot, 4)?;
++            println!("boot_a 起始扇区: {}", boot_a.starting_lba);
++
++            // 1. 写修改后的 GPT 到 LUN4 扇区 0
++            let mut gpt = File::open(&gpt_file)?;
++            let gpt_sectors = gpt
++                .metadata()?
++                .len()
++                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
++            println!("写入修改后 GPT ({} 扇区)...", gpt_sectors);
++            firehose_program_storage(
++                &mut qdl_dev,
++                &mut gpt,
++                "gpt_modified",
++                gpt_sectors as usize,
++                args.storage_slot,
++                4,
++                "0",
++            )?;
++
++            // 2. 写 uefi_unlock 到 boot_a
++            let mut uefi = File::open(&uefi_file)?;
++            let uefi_sectors = uefi
++                .metadata()?
++                .len()
++                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
++            println!("写入解锁 UEFI 到 boot_a ({} 扇区)...", uefi_sectors);
++            firehose_program_storage(
++                &mut qdl_dev,
++                &mut uefi,
++                "boot_a",
++                uefi_sectors as usize,
++                args.storage_slot,
++                4,
++                &boot_a.starting_lba.to_string(),
++            )?;
++            println!("解锁刷写完成");
++        }
++        Command::UnlockRestore { gpt_file, boot_file } => {
++            // 1. 恢复原 GPT
++            let mut gpt = File::open(&gpt_file)?;
++            let gpt_sectors = gpt
++                .metadata()?
++                .len()
++                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
++            println!("恢复原 GPT ({} 扇区)...", gpt_sectors);
++            firehose_program_storage(
++                &mut qdl_dev,
++                &mut gpt,
++                "gpt_restore",
++                gpt_sectors as usize,
++                args.storage_slot,
++                4,
++                "0",
++            )?;
++
++            // 2. 恢复 boot_a (需要从原 GPT 找起始扇区, 但原 GPT 刚恢复, 直接读)
++            let boot_a = find_part(&mut qdl_dev, "boot_a", args.storage_slot, 4)?;
++            let mut boot = File::open(&boot_file)?;
++            let boot_sectors = boot
++                .metadata()?
++                .len()
++                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
++            println!("恢复 boot_a ({} 扇区)...", boot_sectors);
++            firehose_program_storage(
++                &mut qdl_dev,
++                &mut boot,
++                "boot_a",
++                boot_sectors as usize,
++                args.storage_slot,
++                4,
++                &boot_a.starting_lba.to_string(),
++            )?;
++            println!("恢复完成");
++        }
+         Command::Reset { reset_mode } => {
+             firehose_reset(&mut qdl_dev, &FirehoseResetMode::from_str(&reset_mode)?, 0)?
+         }
+diff --git a/cli/src/util.rs b/cli/src/util.rs
+index 6a4cd59..cee89a3 100644
+--- a/cli/src/util.rs
++++ b/cli/src/util.rs
+@@ -51,6 +51,31 @@ pub fn find_part<T: QdlChan>(
+     }
+ }
+ 
++pub fn probe_gpt<T: QdlChan>(channel: &mut T, slot: u8) -> Result<()> {
++    use std::io::sink;
++
++    // Try reading 1 sector at sector 1 (GPT header) across sector sizes and LUNs
++    for sector_size in [4096usize, 512] {
++        channel.mut_fh_config().storage_sector_size = sector_size;
++        for phys_part_idx in 0..=6u8 {
++            let r = qdl::firehose_read_storage(channel, &mut sink(), 1, slot, phys_part_idx, 1);
++            match r {
++                Ok(_) => println!(
++                    "{} READ OK: sector_size={} LUN={} start_sector=1",
++                    "[OK]".green(),
++                    sector_size,
++                    phys_part_idx
++                ),
++                Err(e) => println!(
++                    "READ FAIL: sector_size={} LUN={} => {}",
++                    sector_size, phys_part_idx, e
++                ),
++            }
++        }
++    }
++    Ok(())
++}
++
+ pub fn print_partition_table<T: QdlChan>(
+     channel: &mut T,
+     slot: u8,
+@@ -86,6 +111,111 @@ pub fn print_partition_table<T: QdlChan>(
+     Ok(())
+ }
+ 
++pub fn backup_critical<T: QdlChan>(channel: &mut T, outdir: &str) -> Result<()> {
++    let outpath = std::path::Path::new(outdir);
++    std::fs::create_dir_all(outpath)?;
++
++    // 关键分区列表 (当前槽位 _a)
++    let lun4_parts: &[&str] = &[
++        "uefi_a",
++        "abl_a",
++        "boot_a",
++        "vbmeta_a",
++        "init_boot_a",
++        "dtbo_a",
++        "aop_a",
++        "aop_config_a",
++        "tz_a",
++        "hyp_a",
++        "keymaster_a",
++        "devcfg_a",
++        "qupfw_a",
++        "cpucp_a",
++        "cpucp_dtb_a",
++        "featenabler_a",
++        "uefisecapp_a",
++        "imagefv_a",
++        "shrm_a",
++        "bluetooth_a",
++        "dsp_a",
++        "recovery_a",
++        "vendor_boot_a",
++        "pvmfw_a",
++        "splash_a",
++        // 基带相关
++        "modem_a",
++        "modem_b",
++        "devinfo",
++        "toolsfv",
++        "logfs",
++        "storsec",
++        "uefivarstore",
++        "secdata",
++    ];
++    let lun1_parts: &[&str] = &[
++        "xbl_a",
++        "xbl_config_a",
++        "multiimgqti_a",
++        "multiimgoem_a",
++        "apdp",
++        "last_parti",
++    ];
++    let lun0_parts: &[&str] = &[
++        "ssd",
++        "persist",
++        "misc",
++        "parameter",
++        "keystore",
++        "frp",
++    ];
++    // 在 LUN2/3 里的启动链分区
++    let lun2_parts: &[&str] = &[
++        "xbl_b",
++        "xbl_config_b",
++        "multiimgqti_b",
++        "multiimgoem_b",
++        "apdpb",
++    ];
++    let lun3_parts: &[&str] = &[
++        "ALIGN_TO_128K_1",
++        "cdt",
++        "ddr",
++    ];
++
++    for (lun, parts) in [
++        (4u8, lun4_parts),
++        (1u8, lun1_parts),
++        (2u8, lun2_parts),
++        (3u8, lun3_parts),
++        (0u8, lun0_parts),
++    ] {
++        // 保存原始 GPT (前 1024 扇区, 足够覆盖 GPT 表)
++        println!("--- LUN{}: 保存原始 GPT ---", lun);
++        {
++            if let Ok(mut gptbin) = std::fs::File::create(outpath.join(format!("gpt_raw_lun{}.bin", lun))) {
++                if let Err(e) = qdl::firehose_read_storage(channel, &mut gptbin, 1024, 0, lun, 0) {
++                    println!("[WARN] LUN{} GPT 读取失败: {}", lun, e);
++                }
++            }
++        }
++
++        for name in parts {
++            let mut f = match std::fs::File::create(outpath.join(format!("L{}__{}.img", lun, name))) {
++                Ok(f) => f,
++                Err(e) => {
++                    println!("[SKIP] {} (LUN{}): {}", name, lun, e);
++                    continue;
++                }
++            };
++            match read_storage_logical_partition(channel, &mut f, name, 0, lun) {
++                Ok(_) => println!("[OK]   {} (LUN{})", name, lun),
++                Err(e) => println!("[SKIP] {} (LUN{}): {}", name, lun, e),
++            }
++        }
++    }
++    Ok(())
++}
++
+ pub fn read_storage_logical_partition<T: QdlChan>(
+     channel: &mut T,
+     out: &mut impl Write,
+diff --git a/qdl/src/lib.rs b/qdl/src/lib.rs
+index e40d209..e119012 100644
+--- a/qdl/src/lib.rs
++++ b/qdl/src/lib.rs
+@@ -421,6 +421,9 @@ pub fn firehose_configure<T: QdlChan>(
+             ),
+             // Zero-length-packet aware host
+             ("ZLPAwareHost", "1"),
++            // Required by ZTE/nubia firehose, otherwise storage ops are NAKed
++            // with "Tool doesn't come from ZTE"
++            ("Oem", "ZTE"),
+         ],
+     )?;
+ 
