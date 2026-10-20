@@ -1,54 +1,57 @@
-# 备份与恢复
+# Backup & Restore
 
-## 分区布局（Z70 Ultra / SM8750 UFS）
+> 中文版: [backup-restore.zh.md](backup-restore.zh.md)
 
-| LUN | 内容 | 关键分区 |
-|-----|------|---------|
-| LUN0 | 系统/数据 | super(16GB)、persist、frp、keystore |
-| LUN1 | A槽引导链 | xbl_a、xbl_config_a、apdp |
-| LUN2 | B槽引导链 | xbl_b、xbl_config_b、apdpb |
-| LUN3 | 配置 | cdt、ddr、ALIGN_TO_128K_1 |
-| LUN4 | 固件/引导 | modem_a/b(350MB×2)、boot_a/b、abl_a/b、uefi_a/b 等 83 分区 |
-| LUN5 | 设备专属(隐藏) | modemst1/2(IMEI)、fsg、fsc、ztecfg |
+## Partition layout (Z70 Ultra / SM8750 UFS)
 
-> LUN5 不通过 GPT 寻址（firehose 读超时），但 ROM 包也不会刷写它们（`filename=""`），
-> 所以 IMEI 天然安全。
+| LUN | Contents | Key partitions |
+|-----|----------|----------------|
+| LUN0 | system/data | super (16GB), persist, frp, keystore |
+| LUN1 | slot A boot chain | xbl_a, xbl_config_a, apdp |
+| LUN2 | slot B boot chain | xbl_b, xbl_config_b, apdpb |
+| LUN3 | config | cdt, ddr, ALIGN_TO_128K_1 |
+| LUN4 | firmware/boot | modem_a/b (350MB×2), boot_a/b, abl_a/b, uefi_a/b — 83 partitions |
+| LUN5 | device-specific (hidden) | modemst1/2 (IMEI), fsg, fsc, ztecfg |
 
-## 备份命令
+> LUN5 is not GPT-addressable (firehose read times out), but ROM packages never
+> write to it (`filename=""`), so the IMEI is naturally safe.
+
+## Backup command
 
 ```bash
 adb reboot edl && sleep 15
-qdl-rs --backend usb -l devprg -s ufs backup -o ~/edl-backup/<时间>
+qdl-rs --backend usb -l devprg -s ufs backup -o ~/edl-backup/<timestamp>
 ```
 
-备份 58 个分区 + 5 个 LUN 的原始 GPT，约 1.2GB。
+Backs up 58 partitions + raw GPT for 5 LUNs, ~1.2GB total.
 
-## 恢复命令
+## Restore commands
 
-### 恢复单个分区
+### Restore a single partition
 
 ```bash
-# 需要知道分区名和 LUN
-qdl-rs --backend usb -l devprg -s ufs -L 4 write boot_a ~/edl-backup/<时间>/L4__boot_a.img
+# Need to know the partition name and LUN
+qdl-rs --backend usb -l devprg -s ufs -L 4 write boot_a ~/edl-backup/<ts>/L4__boot_a.img
 ```
 
-### 恢复 GPT（整表）
+### Restore the GPT (full table)
 
 ```bash
-qdl-rs --backend usb -l devprg -s ufs -L 4 overwrite-storage ~/edl-backup/<时间>/gpt_raw_lun4.bin
+qdl-rs --backend usb -l devprg -s ufs -L 4 overwrite-storage ~/edl-backup/<ts>/gpt_raw_lun4.bin
 ```
 
-### 恢复基带（信号问题时）
+### Restore baseband (cellular issues)
 
 ```bash
-qdl-rs --backend usb -l devprg -s ufs -L 4 write modem_a ~/edl-backup/<时间>/L4__modem_a.img
+qdl-rs --backend usb -l devprg -s ufs -L 4 write modem_a ~/edl-backup/<ts>/L4__modem_a.img
 ```
 
-## 救砖流程
+## Unbrick procedure
 
-1. 关机 → 按住「音量上+音量下」→ 插 USB 进 9008
-2. 用备份恢复损坏的分区
-3. 重启
+1. Power off → hold Vol+ AND Vol- → plug USB to enter 9008 (EDL)
+2. Restore the damaged partitions from backup
+3. Reboot
 
-> 9008 跑在 BootROM 层，不依赖系统/GPT/bootloader，所以任何软件损坏都能救。
-> 唯一救不了的是物理损坏和"熔断"更新烧的 fuse。
+> EDL runs in the BootROM (below system/GPT/bootloader), so it works regardless of
+> the software state. The only unrecoverable scenarios are physical damage and
+> blown fuses from "fusing" OTAs.

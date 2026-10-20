@@ -56,7 +56,7 @@ With `Oem="ZTE"`, the firehose logs `zte download tool: 1` and grants full stora
 
 This is the key step — without it, no community tool (qdl-rs/QFIL/edl) can flash SM8750 ZTE devices.
 
-See [docs/firehose-secret.md](docs/firehose-secret.md) (Chinese) for the full investigation.
+See [docs/firehose-secret.md](docs/firehose-secret.md) for the full investigation.
 
 ---
 
@@ -217,10 +217,11 @@ nubia-z70-ultra-unlock/
 ├── README_zh.md               # Chinese version
 ├── LICENSE                    # Non-commercial license
 ├── z70.sh                     # One-shot script (init/auto/backup/flash/...)
-├── docs/                      # Technical docs (Chinese)
+├── docs/                      # Technical docs (EN + 中文)
 │   ├── firehose-secret.md     # Oem="ZTE" discovery
 │   ├── unlock-bootloader.md   # Unlock internals
 │   └── backup-restore.md      # Backup & restore
+│   └── *.zh.md                # 中文版本
 ├── scripts/
 │   ├── gpt_edit.py            # GPT partition editor
 │   ├── filter_rawprogram.py   # rawprogram filter
