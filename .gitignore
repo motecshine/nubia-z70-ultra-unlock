@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# 备份和 ROM (太大, 不进仓库)
+# Backups and ROM (too large for the repo)
 ~/edl-backup/
 edl-backup/
 ~/edl-rom/
@@ -12,6 +12,6 @@ edl-rom/
 *.zip
 *.exe
 
-# 临时文件
+# Temp files
 /tmp/
 *.aria2

@@ -1,5 +1,5 @@
 diff --git a/cli/src/main.rs b/cli/src/main.rs
-index 00a12ba..2d7bee3 100644
+index 00a12ba..a829d95 100644
 --- a/cli/src/main.rs
 +++ b/cli/src/main.rs
 @@ -14,7 +14,8 @@ use qdl::{
@@ -53,17 +53,17 @@ index 00a12ba..2d7bee3 100644
 +        Command::ProbeGpt => probe_gpt(&mut qdl_dev, args.storage_slot)?,
 +        Command::Backup { outdir } => backup_critical(&mut qdl_dev, &outdir)?,
 +        Command::UnlockFlash { gpt_file, uefi_file } => {
-+            // 先拿到 boot_a 起始扇区 (读当前 GPT)
++            // Get boot_a start sector from the current GPT
 +            let boot_a = find_part(&mut qdl_dev, "boot_a", args.storage_slot, 4)?;
-+            println!("boot_a 起始扇区: {}", boot_a.starting_lba);
++            println!("boot_a start sector: {}", boot_a.starting_lba);
 +
-+            // 1. 写修改后的 GPT 到 LUN4 扇区 0
++            // 1. Write modified GPT to LUN4 sector 0
 +            let mut gpt = File::open(&gpt_file)?;
 +            let gpt_sectors = gpt
 +                .metadata()?
 +                .len()
 +                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
-+            println!("写入修改后 GPT ({} 扇区)...", gpt_sectors);
++            println!("Writing modified GPT ({} sectors)...", gpt_sectors);
 +            firehose_program_storage(
 +                &mut qdl_dev,
 +                &mut gpt,
@@ -74,13 +74,13 @@ index 00a12ba..2d7bee3 100644
 +                "0",
 +            )?;
 +
-+            // 2. 写 uefi_unlock 到 boot_a
++            // 2. Write uefi_unlock to boot_a
 +            let mut uefi = File::open(&uefi_file)?;
 +            let uefi_sectors = uefi
 +                .metadata()?
 +                .len()
 +                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
-+            println!("写入解锁 UEFI 到 boot_a ({} 扇区)...", uefi_sectors);
++            println!("Writing unlock UEFI to boot_a ({} sectors)...", uefi_sectors);
 +            firehose_program_storage(
 +                &mut qdl_dev,
 +                &mut uefi,
@@ -90,16 +90,16 @@ index 00a12ba..2d7bee3 100644
 +                4,
 +                &boot_a.starting_lba.to_string(),
 +            )?;
-+            println!("解锁刷写完成");
++            println!("Unlock flash complete");
 +        }
 +        Command::UnlockRestore { gpt_file, boot_file } => {
-+            // 1. 恢复原 GPT
++            // 1. Restore original GPT
 +            let mut gpt = File::open(&gpt_file)?;
 +            let gpt_sectors = gpt
 +                .metadata()?
 +                .len()
 +                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
-+            println!("恢复原 GPT ({} 扇区)...", gpt_sectors);
++            println!("Restoring original GPT ({} sectors)...", gpt_sectors);
 +            firehose_program_storage(
 +                &mut qdl_dev,
 +                &mut gpt,
@@ -110,14 +110,14 @@ index 00a12ba..2d7bee3 100644
 +                "0",
 +            )?;
 +
-+            // 2. 恢复 boot_a (需要从原 GPT 找起始扇区, 但原 GPT 刚恢复, 直接读)
++            // 2. Restore boot_a (find start sector from the just-restored GPT)
 +            let boot_a = find_part(&mut qdl_dev, "boot_a", args.storage_slot, 4)?;
 +            let mut boot = File::open(&boot_file)?;
 +            let boot_sectors = boot
 +                .metadata()?
 +                .len()
 +                .div_ceil(qdl_dev.fh_cfg.storage_sector_size as u64);
-+            println!("恢复 boot_a ({} 扇区)...", boot_sectors);
++            println!("Restoring boot_a ({} sectors)...", boot_sectors);
 +            firehose_program_storage(
 +                &mut qdl_dev,
 +                &mut boot,
@@ -127,13 +127,13 @@ index 00a12ba..2d7bee3 100644
 +                4,
 +                &boot_a.starting_lba.to_string(),
 +            )?;
-+            println!("恢复完成");
++            println!("Restore complete");
 +        }
          Command::Reset { reset_mode } => {
              firehose_reset(&mut qdl_dev, &FirehoseResetMode::from_str(&reset_mode)?, 0)?
          }
 diff --git a/cli/src/util.rs b/cli/src/util.rs
-index 6a4cd59..cee89a3 100644
+index 6a4cd59..d036d79 100644
 --- a/cli/src/util.rs
 +++ b/cli/src/util.rs
 @@ -51,6 +51,31 @@ pub fn find_part<T: QdlChan>(
@@ -176,7 +176,7 @@ index 6a4cd59..cee89a3 100644
 +    let outpath = std::path::Path::new(outdir);
 +    std::fs::create_dir_all(outpath)?;
 +
-+    // 关键分区列表 (当前槽位 _a)
++    // Critical partition list (current slot _a)
 +    let lun4_parts: &[&str] = &[
 +        "uefi_a",
 +        "abl_a",
@@ -203,7 +203,7 @@ index 6a4cd59..cee89a3 100644
 +        "vendor_boot_a",
 +        "pvmfw_a",
 +        "splash_a",
-+        // 基带相关
++        // Baseband-related
 +        "modem_a",
 +        "modem_b",
 +        "devinfo",
@@ -229,7 +229,7 @@ index 6a4cd59..cee89a3 100644
 +        "keystore",
 +        "frp",
 +    ];
-+    // 在 LUN2/3 里的启动链分区
++    // Boot chain partitions on LUN2/3
 +    let lun2_parts: &[&str] = &[
 +        "xbl_b",
 +        "xbl_config_b",
@@ -250,12 +250,12 @@ index 6a4cd59..cee89a3 100644
 +        (3u8, lun3_parts),
 +        (0u8, lun0_parts),
 +    ] {
-+        // 保存原始 GPT (前 1024 扇区, 足够覆盖 GPT 表)
-+        println!("--- LUN{}: 保存原始 GPT ---", lun);
++        // Save raw GPT (first 1024 sectors, enough for the GPT table)
++        println!("--- LUN{}: saving raw GPT ---", lun);
 +        {
 +            if let Ok(mut gptbin) = std::fs::File::create(outpath.join(format!("gpt_raw_lun{}.bin", lun))) {
 +                if let Err(e) = qdl::firehose_read_storage(channel, &mut gptbin, 1024, 0, lun, 0) {
-+                    println!("[WARN] LUN{} GPT 读取失败: {}", lun, e);
++                    println!("[WARN] LUN{} GPT read failed: {}", lun, e);
 +                }
 +            }
 +        }
