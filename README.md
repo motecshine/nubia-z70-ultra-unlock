@@ -1,343 +1,249 @@
-# nubia Z70 Ultra (NX733J) 解锁 + 刷国际版 完整工具包
+# nubia Z70 Ultra (NX733J) — Bootloader Unlock & Global ROM Toolkit
 
-针对 **努比亚 Z70 Ultra (NX733J, 骁龙8 Elite/SM8750)** 的完整解锁与刷机流程。
-包含：EDL 刷机、Bootloader 解锁、国行→国际版转换、完整备份/恢复。
+Complete toolkit for the **nubia Z70 Ultra (NX733J, Snapdragon 8 Elite / SM8750)**:
+EDL flashing, bootloader unlock, CN → Global ROM conversion, full backup/restore.
 
-> ⚠️ **警告**：本流程会清空数据、解锁 bootloader、修改系统分区。操作前务必完整备份。作者对任何砖机/数据丢失不负责。
+> ⚠️ **WARNING**: This process wipes data, unlocks the bootloader and modifies system
+> partitions. Back up everything first. The author is not responsible for any bricks
+> or data loss.
+>
+> 📖 **中文文档**: [README_zh.md](README_zh.md)
 
 ---
 
-## 目录
+## Table of Contents
 
-- [成果速览](#成果速览)
-- [核心发现：Oem="ZTE"](#核心发现oemzte)
-- [准备工作](#准备工作)
-- [Step 1: 编译工具](#step-1-编译工具)
-- [Step 2: 完整备份](#step-2-完整备份)
-- [Step 3: 解锁 Bootloader](#step-3-解锁-bootloader)
-- [Step 4: 刷国际版 ROM](#step-4-刷国际版-rom)
-- [Step 5: 冻结 OTA](#step-5-冻结-ota)
-- [恢复/救砖](#恢复救砖)
+- [Highlights](#highlights)
+- [Core discovery: Oem="ZTE"](#core-discovery-oemzte)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Step-by-step](#step-by-step)
+- [Recovery / unbrick](#recovery--unbrick)
 - [FAQ](#faq)
+- [Repository layout](#repository-layout)
 
 ---
 
-## 成果速览
+## Highlights
 
-| 项目 | 结果 |
-|------|------|
-| Bootloader | ✅ 解锁（`fastboot flashing unlock`） |
-| 系统 | ✅ 国际版 `PQ84A01-UN`（含 Google 服务） |
-| OTA | ✅ 冻结（防熔断更新） |
-| Root | 可选（未 root，bootloader 已解锁可随时 root） |
+| Item | Result |
+|------|--------|
+| Bootloader | ✅ Unlocked (`fastboot flashing unlock`) |
+| System | ✅ Global `PQ84A01-UN` (Google services included) |
+| OTA | ✅ Frozen (blocks "fusing" updates) |
+| Root | Optional (unlocked bootloader, root anytime) |
 
 ---
 
-## 核心发现：Oem="ZTE"
+## Core discovery: Oem="ZTE"
 
-ZTE 的 SM8750 firehose（`xbl_s_devprg_ns.melf` / `devprg`）会对**主机工具做身份校验**：
+The SM8750 ZTE firehose (`xbl_s_devprg_ns.melf` / `devprg`) authenticates the **host tool**:
 
 ```
 LOG: ERROR: Tool doesn't come from ZTE.
 ```
 
-没有 ZTE 官方工具的签名凭证，所有存储读写都会被 NAK 拒绝。
+Without ZTE's official tool credentials, every storage read/write is NAKed.
 
-**突破点**：firehose 的 configure 命令需要一个特殊属性：
+**The bypass**: the firehose's `configure` command needs one extra attribute:
 
 ```xml
 <configure MemoryName="ufs" ... SkipStorageInit="0" Oem="ZTE"/>
                                             └───────┘
 ```
 
-加上 `Oem="ZTE"` 后，firehose 日志变为 `zte download tool: 1`，存储读写全部放行。
+With `Oem="ZTE"`, the firehose logs `zte download tool: 1` and grants full storage access.
 
-这是整个流程的关键 —— 没有这一步，qdl-rs/QFIL 等社区工具都无法刷写 SM8750 的 ZTE 设备。
+This is the key step — without it, no community tool (qdl-rs/QFIL/edl) can flash SM8750 ZTE devices.
 
----
-
-## 准备工作
-
-### 硬件/软件需求
-
-- **Mac 或 Linux**（本流程在 macOS 上验证）
-- 手机：nubia Z70 Ultra (NX733J)，能进系统（ADB 可用）
-- 已下载的**国际版 ROM**（Needrom 上的 `ZTE-Nubia-Z70-Ultra.7z`，8.53GB）
-- 补丁 UEFI 文件 `uefi_unlock_8e.img`（来自 ZTE Family Toolbox）
-
-### 一键初始化环境（推荐）
-
-```bash
-cd ~/z70-ultra-unlock
-./z70.sh init       # 装依赖 + 编译 qdl-rs + 下载 firehose + 配置 aria2
-./z70.sh doctor     # 检查环境是否就绪
-```
-
-`init` 会自动完成：
-- 安装 Homebrew + sevenzip + aria2 + android-platform-tools + rust + libusb
-- 设置 Python venv (pyusb)
-- 克隆 qualcomm/qdlrs 并打 `Oem="ZTE"` 补丁
-- 编译 qdl-rs + fh_reset
-- 从仓库 tools/ 复制 firehose + 补丁 UEFI
-- 配置并启动 aria2 RPC
-
-### 一键脚本全部命令
-
-```bash
-cd ~/z70-ultra-unlock
-./z70.sh init        # 初始化环境
-./z70.sh doctor      # 检查环境
-./z70.sh auto        # ⭐ 全自动解锁流水线 (备份→解锁→恢复)
-./z70.sh backup      # 单独完整备份
-./z70.sh flash       # 刷国际版 ROM
-./z70.sh verify      # 验证解锁/版本
-./z70.sh freeze-ota  # 冻结 OTA
-```
-
-#### `auto` 流水线说明
-
-`./z70.sh auto` 按序执行：
-
-| 步骤 | 内容 | 是否自动 |
-|------|------|---------|
-| 1/6 | 完整备份分区 | ✅ 自动 |
-| 2/6 | 刷解锁 (改GPT+补丁UEFI) | ✅ 自动 |
-| 3/6 | `fastboot flashing unlock` + 屏幕确认 | ⚠️ 人工 |
-| 4/6 | 按键进 9008 | ⚠️ 人工 |
-| 5/6 | 恢复原 GPT + boot | ✅ 自动 |
-| 6/6 | 验证解锁状态 | ✅ 自动 |
-
-两个人工步骤是物理限制（手机屏幕按键 + 硬件进 EDL），脚本会暂停等你回车。
-
-### 手动安装依赖（可选，不用 init 时）
-
-```bash
-brew install sevenzip aria2 android-platform-tools rust
-```
-
-### 克隆 qdl-rs 并打补丁
-
-```bash
-git clone --depth 1 https://github.com/qualcomm/qdlrs.git /tmp/qdlrs
-cd /tmp/qdlrs
-# 应用 Oem="ZTE" 补丁（见 patches/ 目录）
-git apply ~/z70-ultra-unlock/patches/qdlrs-oem-zte.patch
-cargo build --release --bin qdl-rs
-```
+See [docs/firehose-secret.md](docs/firehose-secret.md) (Chinese) for the full investigation.
 
 ---
 
-## Step 1: 编译工具
-
-编译好的 `qdl-rs` 就是刷机主工具，配合 firehose（`devprg`）使用。
+## Quick start
 
 ```bash
-cd /tmp/qdlrs
-cargo build --release --bin qdl-rs
-cp target/release/qdl-rs ~/edl-tools/qdl-rs
+git clone https://github.com/motecshine/nubia-z70-ultra-unlock.git
+cd nubia-z70-ultra-unlock
+
+./z70.sh init        # Install deps + build qdl-rs (auto-detects your OS)
+./z70.sh doctor      # Check environment
+./z70.sh auto        # ⭐ Full unlock pipeline (backup → unlock → restore)
+./z70.sh flash       # Flash global ROM
+./z70.sh freeze-ota  # Freeze OTA updates
 ```
 
-firehose 文件来源：工具箱 `bin/res/NX789J/devprg`（与 Z70 Ultra 通用），
-或 GitHub `Iqinix/Qualcomm-firehoses` 仓库的 `ZTE/NX789J.elf`。
+### `auto` pipeline
+
+| Step | Action | Automated |
+|------|--------|-----------|
+| 1/6 | Full partition backup | ✅ |
+| 2/6 | Flash unlock (modified GPT + patched UEFI) | ✅ |
+| 3/6 | `fastboot flashing unlock` + on-screen confirm | ⚠️ manual |
+| 4/6 | Hardware-enter EDL (volume keys + USB) | ⚠️ manual |
+| 5/6 | Restore original GPT + boot | ✅ |
+| 6/6 | Verify unlock state | ✅ |
+
+The two manual steps are physical limitations (phone screen + hardware EDL entry);
+the script pauses and waits for you.
 
 ---
 
-## Step 2: 完整备份
+## How it works
 
-**刷机前必须备份！** 备份通过 EDL 只读完成，零风险。
+### Bootloader unlock (AVB exploit)
 
-```bash
-# 进 9008 模式
-adb reboot edl
-sleep 15
+The Z70 Ultra's stock bootloader has **no** unlock command (`flashing unlock` / `oem unlock`
+both return `unknown command`). The exploit:
 
-# 备份所有关键分区（LUN0/1/2/3/4）
-mkdir -p ~/edl-backup
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs \
-  backup -o ~/edl-backup/$(date +%Y%m%d)
+```
+1. Remove vbmeta_a + pvmfw_a from GPT  → disables AVB verification
+2. Flash patched UEFI to boot_a       → boots into a "standard" Fastboot
+3. Reboot → standard Fastboot mode
+4. fastboot flashing unlock           → sets persistent unlock flag
+5. Restore original GPT + boot
+6. Reboot → unlocked
 ```
 
-备份内容（58 个分区，~1.2GB）：
-- **LUN0**：persist/frp/keystore/misc/parameter/ssd（校准+FRP）
-- **LUN1**：xbl_a/xbl_config_a/apdp（A槽引导链）
-- **LUN2**：xbl_b/xbl_config_b/apdpb（B槽引导链）
-- **LUN3**：cdt/ddr（配置）
-- **LUN4**：全部83分区（含 modem_a/b 基带、boot、abl、uefi 等）
+### Global ROM flash
+
+1. Get the global ROM (`Z70Ultra_NebulaOS1.0.7MR3_NX733J_GB_15`, GB = Global)
+2. Filter `rawprogram*.xml` (drop GPT entries + empty-filename device-specific partitions)
+3. Flash with `qdl-rs flasher`
+
+The ROM package already excludes dangerous partitions (`modemst1/2` = IMEI, `fsg/fsc`
+= radio calibration, `devinfo` = unlock state, `persist` = sensor calibration) — their
+`filename=""` means they're defined but never written.
 
 ---
 
-## Step 3: 解锁 Bootloader
+## Step-by-step
 
-### 原理
+### 0. Prerequisites
 
-工具箱的 AVB exploit 方案：
-1. 删除 GPT 中的 `vbmeta_a` 和 `pvmfw_a` 分区（关闭 AVB 校验）
-2. 把补丁 UEFI（`uefi_unlock_8e.img`）刷到 `boot_a`
-3. 重启后设备进入**标准 Fastboot 模式**（支持 `flashing unlock`）
-4. 执行解锁，再恢复原 GPT + boot
+- macOS or Linux (verified on macOS)
+- nubia Z70 Ultra (NX733J) with working ADB
+- Global ROM (optional, 8.5GB): https://www.needrom.com/download/zte-nubia-z70-ultra/
+  (version `Z70Ultra_NebulaOS1.0.7MR3_NX733J_GB_15`)
 
-### 执行
+### 1. Initialize environment
 
 ```bash
-# 1. 生成修改版 GPT（删除 vbmeta_a + pvmfw_a）
-python3 scripts/gpt_edit.py \
-  ~/edl-backup/<时间>/gpt_raw_lun4.bin \
-  /tmp/gpt_modified.bin vbmeta_a pvmfw_a
-
-# 2. 截取 GPT 部分（前 6 扇区）
-python3 -c "open('/tmp/gpt_mod_6s.bin','wb').write(open('/tmp/gpt_modified.bin','rb').read()[:6*4096])"
-python3 -c "open('/tmp/gpt_orig_6s.bin','wb').write(open('~/edl-backup/<时间>/gpt_raw_lun4.bin','rb').read()[:6*4096])"
-
-# 3. 进 EDL 刷入（改 GPT + 补丁 UEFI 到 boot_a）
-adb reboot edl
-sleep 15
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs --reset-mode system \
-  unlock-flash --gpt-file /tmp/gpt_mod_6s.bin --uefi-file ~/edl-tools/uefi_unlock_8e.img
-
-# 4. 设备重启后进入标准 Fastboot（序列号会变成 af6c26cd）
-fastboot devices
-
-# 5. 执行解锁（手机会弹确认屏，音量键选 UNLOCK，电源键确认）
-fastboot flashing unlock
-
-# 6. 解锁后重新进 EDL 恢复（需要硬件按键：关机→按住两个音量键→插USB）
-#    然后恢复原 GPT + boot_a
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs --reset-mode system \
-  unlock-restore --gpt-file /tmp/gpt_orig_6s.bin --boot-file ~/edl-backup/<时间>/L4__boot_a.img
-
-# 7. 验证解锁
-adb shell getprop ro.boot.flash.locked   # 输出 0 = 已解锁
+./z70.sh init
 ```
 
----
+This installs dependencies (Homebrew, sevenzip, aria2, android-platform-tools, rust,
+libusb), clones + patches + builds qdl-rs, copies the bundled firehose and patched UEFI
+from `tools/`, and starts aria2 RPC.
 
-## Step 4: 刷国际版 ROM
-
-### 4.1 下载 ROM
-
-- **预览/下载页**：https://www.needrom.com/download/zte-nubia-z70-ultra/
-- 来源：Needrom（需注册登录）
-- 版本：`Z70Ultra_NebulaOS1.0.7MR3_NX733J_GB_15`（GB=国际版）
-- 大小：8.53GB（.7z）
-- 下载建议：开 Cloudflare WARP 绕过 TLS 限制，aria2 最多 2 连接（Needrom 限制，超了会 ban）
-
-### 4.2 解压
+### 2. Full backup
 
 ```bash
-mkdir -p ~/edl-rom && cd ~/edl-rom
-7zz x ~/Downloads/ZTE-Nubia-Z70-Ultra.7z
+./z70.sh auto   # does backup first, then unlock
+# or backup only:
+adb reboot edl && sleep 15
+./z70.sh backup
 ```
 
-### 4.3 过滤 rawprogram（剔除危险分区）
+Backs up 58 partitions across LUN0/1/2/3/4 (~1.2GB) including modem (baseband), boot
+chain, calibration data and all GPT tables.
 
-ROM 包的 rawprogram 里 `filename=""` 的分区（modemst1/2=IMEI、fsg/fsc=基带校准、
-devinfo=解锁状态、persist=传感器校准）**不会被刷写**，这是安全的。
+### 3. Unlock bootloader
 
-但 GPT 条目（PrimaryGPT/BackupGPT）含 QFIL 占位符，qdl-rs 不识别，需剔除：
+`./z70.sh auto` walks you through the full unlock flow (backup → flash → unlock → restore).
+
+### 4. Flash global ROM
 
 ```bash
+# Download + extract the ROM first, then:
 python3 scripts/filter_rawprogram.py ~/edl-rom/ROM/images
+adb reboot edl && sleep 15
+./z70.sh flash
 ```
 
-### 4.4 刷入
+~10-15 min (17GB super partition). First boot takes 5-10 minutes.
+
+### 5. Freeze OTA (critical!)
 
 ```bash
-adb reboot edl
-sleep 15
-cd ~/edl-rom/ROM/images
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs --reset-mode system \
-  flasher -p rawprogram0.xml rawprogram1.xml rawprogram2.xml rawprogram4.xml
+./z70.sh freeze-ota
 ```
 
-> 约 10-15 分钟（super 分区 17GB）。刷完设备自动重启，首次开机 5-10 分钟。
-
-### 4.5 验证
-
-```bash
-adb shell getprop ro.product.name    # 应为 PQ84A01-UN（国际版）
-adb shell getprop ro.boot.flash.locked  # 0 = 仍解锁
-```
+ZTE pushes "fusing" OTAs that permanently burn SoC fuses and re-lock the bootloader.
+Freezing the updater keeps your unlock forever.
 
 ---
 
-## Step 5: 冻结 OTA
+## Recovery / unbrick
 
-**必须做！** ZTE 的"熔断"OTA 会烧 SoC fuse 永久锁死 bootloader。
-
-```bash
-for pkg in com.zte.zdm com.zte.zdmdaemon com.zte.zdmdaemon.install com.zte.zdm.omacp com.google.android.configupdater; do
-  adb shell pm disable-user --user 0 $pkg
-done
-```
-
----
-
-## 恢复/救砖
-
-任何软件层面的损坏都能通过 EDL + 备份恢复：
+Any software damage is recoverable via EDL + backups:
 
 ```bash
-# 硬件进 9008：关机 → 按住「音量上+音量下」→ 插 USB
-# 恢复单个分区
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs \
-  write <分区名> <备份镜像> -L <LUN号>
-
-# 恢复 GPT（LUN4）
-~/edl-tools/qdl-rs --backend usb -l ~/edl-tools/devprg_z70u -s ufs -L 4 \
-  overwrite-storage ~/edl-backup/<时间>/gpt_raw_lun4.bin
+# Hardware EDL entry: power off → hold Vol+ AND Vol- → plug USB
+# Restore a single partition:
+qdl-rs --backend usb -l devprg -s ufs write <partition> <backup.img> -L <LUN>
+# Restore GPT:
+qdl-rs --backend usb -l devprg -s ufs -L 4 overwrite-storage gpt_raw_lun4.bin
 ```
+
+EDL runs in the BootROM (below system/GPT/bootloader), so it works no matter what
+software state the device is in. The only unrecoverable scenarios are physical damage
+and blown fuses from "fusing" OTAs.
 
 ---
 
 ## FAQ
 
-**Q: 指纹失效了？**
-A: 解锁可能破坏指纹校准。工具箱 v1.2.1+ 有修复功能（需要 Windows）。
+**Q: Fingerprint stopped working?**
+A: Unlock can break fingerprint calibration. Toolbox v1.2.1+ has a fix (needs Windows).
 
-**Q: 能正常 OTA 吗？**
-A: 不能也不要用。OTA 被冻结了，且"熔断"更新会永久锁死。系统更新走手动 EDL 刷。
+**Q: Will OTA work?**
+A: No, and don't use it. OTA is frozen; "fusing" updates would permanently re-lock.
+Update the system manually via EDL instead.
 
-**Q: 想 root？**
-A: bootloader 已解锁，用 Magisk patch boot.img 再刷入即可。
+**Q: Can I root?**
+A: Bootloader is unlocked — patch boot.img with Magisk and flash it.
 
-**Q: 基带/信号出问题？**
-A: 备份里有国行 modem_a.img，刷回即可。
+**Q: Cellular/IMEI issues?**
+A: The backup contains the CN `modem_a.img`; flash it back to restore.
 
 ---
 
-## 目录结构
+## Repository layout
 
 ```
-z70-ultra-unlock/
-├── README.md                  # 本文档
-├── LICENSE                    # 非商业使用许可
-├── z70.sh                     # 一键脚本 (init/backup/unlock/flash/...)
-├── docs/
-│   ├── firehose-secret.md     # Oem="ZTE" 发现过程
-│   ├── unlock-bootloader.md   # 解锁原理详解
-│   └── backup-restore.md      # 备份恢复详解
+nubia-z70-ultra-unlock/
+├── README.md                  # This document (English)
+├── README_zh.md               # Chinese version
+├── LICENSE                    # Non-commercial license
+├── z70.sh                     # One-shot script (init/auto/backup/flash/...)
+├── docs/                      # Technical docs (Chinese)
+│   ├── firehose-secret.md     # Oem="ZTE" discovery
+│   ├── unlock-bootloader.md   # Unlock internals
+│   └── backup-restore.md      # Backup & restore
 ├── scripts/
-│   ├── gpt_edit.py            # GPT 分区编辑（删分区）
-│   ├── filter_rawprogram.py   # rawprogram 过滤
-│   └── aria2.conf             # aria2 配置（2连接，防ban）
+│   ├── gpt_edit.py            # GPT partition editor
+│   ├── filter_rawprogram.py   # rawprogram filter
+│   └── aria2.conf             # aria2 config (2 connections, avoids ban)
 ├── patches/
-│   ├── qdlrs-oem-zte.patch    # qdl-rs 补丁（Oem=ZTE + backup/unlock命令）
-│   └── fh_reset.rs            # 卡 firehose 时救回的工具源码
-└── tools/                     # 随仓库提供的设备文件 (跨平台)
-    ├── firehose/
-    │   └── NX789J.elf         # SM8750 ZTE 签名 firehose
-    └── uefi/
-        └── uefi_unlock_8e.img # 补丁 UEFI (解锁必需)
-
-> 注: 刷机工具 qdl-rs 需自行编译 (`./z70.sh init` 自动完成)，
-> 因为编译产物是平台相关的 (macOS/Linux/Windows 各不相同)。
+│   ├── qdlrs-oem-zte.patch    # Core patch (Oem="ZTE" + backup/unlock cmds)
+│   └── fh_reset.rs            # Rescue tool source
+└── tools/                     # Device files (cross-platform)
+    ├── firehose/NX789J.elf    # SM8750 ZTE-signed firehose
+    └── uefi/uefi_unlock_8e.img # Patched UEFI (required for unlock)
 ```
+
+> Note: qdl-rs is built from source by `./z70.sh init` — binaries are platform-specific.
 
 ---
 
-## 致谢
+## Credits
 
-- [qualcomm/qdlrs](https://github.com/qualcomm/qdlrs) - 高通官方 EDL 工具
-- [Iqinix/Qualcomm-firehoses](https://github.com/Iqinix/Qualcomm-firehoses) - firehose 收集
-- ZTE Family Toolbox 作者「某贼」(酷安) - 解锁 exploit
-- XDA 社区 @danielxik @dev-reverse - 工具箱英文版
+- [qualcomm/qdlrs](https://github.com/qualcomm/qdlrs) — official Qualcomm EDL tool
+- [Iqinix/Qualcomm-firehoses](https://github.com/Iqinix/Qualcomm-firehoses) — firehose collection
+- ZTE Family Toolbox author "某贼" (CoolAPK) — the unlock exploit
+- XDA community @danielxik @dev-reverse — English toolbox port
+
+## License
+
+**Non-commercial use only.** See [LICENSE](LICENSE). Commercial use requires written permission.
